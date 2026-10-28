@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111318">
+  <title>Project Hub</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111318;
+      color: #f3f4f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 28px 18px;
+      background: radial-gradient(ellipse at top, #222735 0%, #111318 60%);
+    }
+    main { width: 100%; max-width: 780px; }
+    .eyebrow {
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: .16em;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    h1 { font-size: clamp(32px, 6vw, 48px); margin: 12px 0 8px; letter-spacing: -.04em; }
+    .subtitle { color: #a5adbb; margin: 0 0 30px; line-height: 1.6; }
+    .projects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .card {
+      border: 1px solid #343946;
+      border-radius: 18px;
+      background: rgba(27, 30, 39, .9);
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      min-height: 245px;
+    }
+    .icon {
+      width: 46px; height: 46px; display: grid; place-items: center;
+      background: #303646; border-radius: 13px; font-size: 22px;
+    }
+    h2 { font-size: 19px; margin: 20px 0 8px; }
+    .description { color: #a5adbb; font-size: 14px; line-height: 1.6; margin: 0 0 24px; }
+    a {
+      margin-top: auto; text-decoration: none; text-align: center;
+      padding: 12px 16px; border-radius: 10px; font-weight: 650;
+      color: #111318; background: #e5e7eb;
+    }
+    a:hover { background: #fff; }
+    a.secondary { color: #e5e7eb; background: #303646; }
+    a.secondary:hover { background: #3c4354; }
+    .status { font-size: 12px; color: #9ca3af; margin-top: 12px; }
+    footer { margin-top: 28px; color: #707887; font-size: 12px; }
+    @media (max-width: 560px) {
+      .projects { grid-template-columns: 1fr; }
+      .card { min-height: 220px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Personal workspace</div>
+    <h1>Project Hub</h1>
+    <p class="subtitle">Your projects, in one place.</p>
+
+    <section class="projects">
+      <article class="card">
+        <div class="icon" aria-hidden="true">▦</div>
+        <h2>HelpDesk Dashboard</h2>
+        <p class="description">Support metrics, reports and operational monitoring.</p>
+        <a href="/dashboard/">Open dashboard</a>
+        <div class="status">Existing project</div>
+      </article>
+
+      <article class="card">
+        <div class="icon" aria-hidden="true">⌂</div>
+        <h2>Household Tracker</h2>
+        <p class="description">Shared food inventory, expiration dates, meals, tasks and habit tracking.</p>
+        <a href="/tracker/">Open tracker</a>
+        <div class="status">Login required</div>
+      </article>
+
+      <article class="card">
+        <div class="icon" aria-hidden="true">∑</div>
+        <h2>HDE AI Analysis</h2>
+        <p class="description">Export HelpDeskEddy tickets from an Excel list, mask personal data, and separate client requests from AI replies.</p>
+        <a class="secondary" href="/hde-analysis/">Open tool</a>
+        <div class="status">Password required</div>
+      </article>
+    </section>
+
+    <footer>Private server · Project Hub</footer>
+  </main>
+</body>
+</html>

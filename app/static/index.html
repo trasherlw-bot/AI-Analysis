@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111318">
+<title>HDE AI Analysis</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <section id="login" hidden>
+    <form id="login-form" class="card narrow">
+      <h1>HDE AI Analysis</h1>
+      <p class="muted">Enter the password to continue.</p>
+      <input id="pw" type="password" placeholder="Password" autocomplete="current-password" required>
+      <p id="login-err" class="err" role="alert"></p>
+      <button class="btn primary" type="submit">Sign in</button>
+      <a class="back" href="../">← All projects</a>
+    </form>
+  </section>
+
+  <section id="app" hidden>
+    <div class="top">
+      <div>
+        <div class="eyebrow">Project</div>
+        <h1>HDE AI Analysis</h1>
+      </div>
+      <div class="right"><a class="back" href="../">All projects</a> <button id="logout" class="btn ghost">Sign out</button></div>
+    </div>
+    <p class="muted">Takes an Excel list of HelpDeskEddy ticket numbers, downloads the tickets, masks personal data, and splits client requests from AI replies.</p>
+    <div id="warn" class="warn" hidden>HDE_EMAIL / HDE_API_KEY are not set on the server. Edit <code>.env</code> and restart the container.</div>
+
+    <div id="names-warn" class="warn" hidden>Personal names are <b>not</b> masked (the name-recognition module is not installed). Emails, phones, links and long numbers are masked, but check the result by eye before sharing it.</div>
+
+    <div class="card">
+      <h2>1. Add a file</h2>
+      <p class="muted small">Upload an .xlsx here, or copy it into <code>/opt/hde-analysis/data/inbox/</code> with WinSCP. The ticket numbers must be in a column named <b>Заявка</b>.</p>
+      <div class="row">
+        <input id="file" type="file" accept=".xlsx">
+        <button id="upload" class="btn">Upload</button>
+      </div>
+      <p id="upload-msg" class="muted small"></p>
+    </div>
+
+    <div class="card">
+      <h2>2. Run</h2>
+      <div id="files"></div>
+      <label class="check"><input id="fresh" type="checkbox"> Re-download all tickets (ignore saved cache)</label>
+    </div>
+
+    <div class="card">
+      <div class="row between"><h2>3. Progress</h2><span id="state" class="pill">idle</span></div>
+      <pre id="log" class="log">Nothing running.</pre>
+      <button id="stop" class="btn danger" hidden>Stop</button>
+    </div>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

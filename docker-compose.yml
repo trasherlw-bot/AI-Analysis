@@ -1,0 +1,17 @@
+services:
+  hde-analysis:
+    build:
+      context: .
+      args:
+        INSTALL_NATASHA: ${INSTALL_NATASHA:-false}
+    container_name: hde-analysis
+    restart: unless-stopped
+    # run as the same user that owns ./data, so WinSCP (user "deploy") and the container can both write
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    env_file: .env
+    volumes:
+      - ./data:/data              # inbox/ (your Excel files) and work/ (results + cache)
+    ports:
+      - "127.0.0.1:3003:8000"     # reachable only from this server; nginx publishes it at /hde-analysis/
+    mem_limit: 400m               # protect the small VPS
+    cpus: 0.5
