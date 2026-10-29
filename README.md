@@ -30,6 +30,26 @@ To also mask names set `INSTALL_NATASHA=true` in `.env` and run `sudo docker com
 It needs roughly 300 MB extra RAM while a job runs; the container is limited to 400 MB, so on a 1 GB server
 check the load first (`free -h`) and stop other heavy jobs.
 
+## Input file and result columns
+- Name the file with the conversation date, e.g. `queue_daily_20261025.xlsx` (YYYYMMDD). **Запрос клиента** then contains only
+  that day's interactions, as `Клиент: … / ИИ: …` pairs. Without a date in the name, all messages are used.
+- Result columns: **ID переписки**, **Запрос клиента**, **Ответы ИИ**, **Диалог (размечено)**. The old columns
+  «Заявки в группе», «Кол-во ответов ИИ», «Статус обработки» are removed; ticket errors are written into «Запрос клиента».
+- **Корректно** (`app/hde_rules.py`; phrases and column letters are constants at the top of that file):
+  - main sheet, column **H** (only if empty): client asks for cancel/return and (AI reply is one of the two return phrases
+    or column **F** = «Отменена часть списка → остальное оператору»); or client asks to change the delivery date and
+    column **F** is one of the three date phrases;
+  - sheet «Эскалации», column **K** (only if empty): G = «Управляющий офисом», same e-mail domain in E and H, and either
+    I ≠ «Ждёт рабочего времени офиса», or I = it and the time in B (UTC+3) is outside 09:00–18:00 in the region from D.
+    Regions missing from the timezone table are listed in the log and skipped.
+- Tests: `python -m unittest discover -s tests`
+
+## API limit
+HelpDeskEddy allows 300 requests/min per account and blocks the account for 20 minutes when exceeded. The script keeps a
+sliding 60-second window at 90% of the limit (`HDE_RATE_LIMIT_RPM`, `HDE_RATE_SAFETY`), slows down when the response
+headers report an almost empty quota, and on HTTP 429 stops at once (no retries) and keeps the tickets already downloaded.
+Run it again after about 20 minutes.
+
 ## Limits and safety
 - One job at a time. The container is limited to 0.5 CPU and 400 MB RAM so it cannot starve the dashboard or tracker.
 - Upload limit 25 MB, `.xlsx` only.

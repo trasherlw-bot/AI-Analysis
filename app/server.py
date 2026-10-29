@@ -134,7 +134,10 @@ def start_job(name, fresh):
         if fresh:
             (wdir / "input.cache.json").unlink(missing_ok=True)
         shutil.copyfile(src, wdir / "input.xlsx")        # script picks the only .xlsx in its folder
-        env = dict(os.environ, DATA_DIR=str(wdir), PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        # SOURCE_NAME: the working copy is always called input.xlsx, so pass the real file name
+        # (e.g. queue_daily_20261025.xlsx): the script takes the conversation date from it
+        env = dict(os.environ, DATA_DIR=str(wdir), SOURCE_NAME=name,
+                   PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         env.pop("APP_PASSWORD", None)                       # the script does not need it
         LOG.clear()
         STOPPED = False

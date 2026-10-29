@@ -23,6 +23,7 @@ input[type=password], input[type=file] { width: 100%; padding: 11px 12px; border
 .btn.ghost { background: transparent; color: #a5adbb; }
 .btn.danger { background: #5a2430; color: #ffd7dd; margin-top: 10px; }
 .btn:disabled { opacity: .5; cursor: default; }
+a.btn { text-decoration: none; display: inline-block; text-align: center; }
 .back { color: #9ca3af; text-decoration: none; font-size: 14px; text-align: center; }
 .back:hover { color: #fff; }
 .err { color: #ff8a8a; min-height: 1.2em; margin: 0; font-size: 14px; }

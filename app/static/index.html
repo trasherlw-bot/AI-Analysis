@@ -16,7 +16,7 @@
       <input id="pw" type="password" placeholder="Password" autocomplete="current-password" required>
       <p id="login-err" class="err" role="alert"></p>
       <button class="btn primary" type="submit">Sign in</button>
-      <a class="back" href="../">← All projects</a>
+      <a class="btn back-btn" href="../">← Back to projects</a>
     </form>
   </section>
 
@@ -26,7 +26,7 @@
         <div class="eyebrow">Project</div>
         <h1>HDE AI Analysis</h1>
       </div>
-      <div class="right"><a class="back" href="../">All projects</a> <button id="logout" class="btn ghost">Sign out</button></div>
+      <div class="right"><a class="btn back-btn" href="../">← Back to projects</a> <button id="logout" class="btn ghost">Sign out</button></div>
     </div>
     <p class="muted">Takes an Excel list of HelpDeskEddy ticket numbers, downloads the tickets, masks personal data, and splits client requests from AI replies.</p>
     <div id="warn" class="warn" hidden>HDE_EMAIL / HDE_API_KEY are not set on the server. Edit <code>.env</code> and restart the container.</div>

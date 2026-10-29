@@ -11,17 +11,21 @@
     python hde_ai_analysis.py                 # обработать файл из папки
     python hde_ai_analysis.py --debug 12345   # показать сырой JSON одной заявки
 """
+import collections
 import html
 import json
 import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 from openpyxl import load_workbook
+from openpyxl.utils import column_index_from_string
+
+import hde_rules
 
 # ===================== НАСТРОЙКИ =====================
 HDE_DOMAIN = os.getenv("HDE_DOMAIN", "kse")      # yourcompany.helpdeskeddy.com
@@ -36,8 +40,15 @@ MASK_LONG_NUMBERS = True                        # маскировать ном�
 KEY_PREFIXES = ("КСЭ", "b2b", "drr")            # с чего начинается id переписки
 PAUSE_SEC = 0.3                                 # пауза между запросами
 SAVE_EVERY = 20                                 # сохранять кэш каждые N заявок
-OUT_COLS = ["ID переписки", "Заявки в группе", "Запрос клиента",
-            "Ответы ИИ", "Кол-во ответов ИИ", "Диалог (размечено)", "Статус обработки"]
+OUT_COLS = ["ID переписки", "Запрос клиента", "Ответы ИИ", "Диалог (размечено)"]
+# Колонки прошлых версий: при обработке файла удаляются, если они там есть
+REMOVED_COLS = ["Заявки в группе", "Кол-во ответов ИИ", "Статус обработки"]
+MSK = timezone(timedelta(hours=3))              # время в HDE и в именах файлов — московское
+
+# Лимит API HelpDeskEddy: 300 запросов в минуту на аккаунт. При превышении аккаунт блокируется на 20 минут.
+RATE_LIMIT_RPM = int(os.getenv("HDE_RATE_LIMIT_RPM", "300"))
+RATE_SAFETY = float(os.getenv("HDE_RATE_SAFETY", "0.9"))   # скрипт держится на 90% лимита
+BLOCK_MINUTES = 20
 # =====================================================
 
 BASE = os.getenv("HDE_BASE_URL") or f"https://{HDE_DOMAIN}.helpdeskeddy.com/api/v2"
@@ -90,13 +101,75 @@ def clean_html(s: str) -> str:
 
 
 # ---------- работа с API ----------
+class RateLimitBlocked(Exception):
+    """HDE ответил 429: аккаунт заблокирован примерно на 20 минут. Продолжать нельзя."""
+
+
+class RateLimiter:
+    """Скользящее окно в 60 с: не даёт отправить больше max_rpm запросов в минуту.
+
+    Дополнительно читает заголовки лимита из ответа HDE (X-RateLimit-Remaining / X-RateLimit-Reset и
+    их варианты), если сервер их присылает, и притормаживает, когда запас почти исчерпан.
+    """
+    REMAINING = ("X-RateLimit-Remaining", "X-Rate-Limit-Remaining", "RateLimit-Remaining")
+    RESET = ("X-RateLimit-Reset", "X-Rate-Limit-Reset", "RateLimit-Reset")
+
+    def __init__(self, rpm, safety):
+        self.max = max(1, int(rpm * safety))
+        self.hits = collections.deque()
+        self.pause_until = 0.0
+
+    def wait(self):
+        while True:
+            now = time.monotonic()
+            if now < self.pause_until:
+                time.sleep(self.pause_until - now)
+                continue
+            while self.hits and now - self.hits[0] >= 60:
+                self.hits.popleft()
+            if len(self.hits) < self.max:
+                self.hits.append(now)
+                return
+            time.sleep(60 - (now - self.hits[0]) + 0.05)
+
+    def note_headers(self, headers):
+        def first(names):
+            for n in names:
+                v = headers.get(n)
+                if v is not None:
+                    return v
+            return None
+        try:
+            remaining = first(self.REMAINING)
+            if remaining is not None and int(remaining) <= 2:
+                reset = first(self.RESET)
+                delay = 60.0
+                if reset is not None:
+                    r = float(reset)
+                    delay = r - time.time() if r > 1e9 else r      # unix-время или секунды
+                self.pause_until = time.monotonic() + min(max(delay, 1.0), 60.0)
+        except (TypeError, ValueError):
+            pass
+
+
+LIMITER = RateLimiter(RATE_LIMIT_RPM, RATE_SAFETY)
+
+
 def api_get(path: str):
     for attempt in range(4):
+        LIMITER.wait()
         try:
             r = requests.get(f"{BASE}{path}", auth=(HDE_EMAIL, HDE_API_KEY), timeout=30)
+            LIMITER.note_headers(r.headers)
             if r.status_code == 200:
                 return r.json()
-            if r.status_code in (429, 500, 502, 503, 504):
+            if r.status_code == 429:
+                # Повторять нельзя: каждый лишний запрос — риск продлить блокировку на аккаунте.
+                raise RateLimitBlocked(
+                    f"HDE вернул 429: превышен лимит {RATE_LIMIT_RPM} запросов/мин, аккаунт заблокирован "
+                    f"примерно на {BLOCK_MINUTES} минут. Подождите и запустите снова: уже скачанные заявки "
+                    f"сохранены в кэше.")
+            if r.status_code in (500, 502, 503, 504):
                 time.sleep(2 * (attempt + 1))
                 continue
             if r.status_code in (401, 403):
@@ -152,7 +225,7 @@ def post_dt(p: dict) -> str:
             continue
         if isinstance(v, (int, float)) or str(v).isdigit():
             try:
-                return datetime.fromtimestamp(int(v)).isoformat()
+                return datetime.fromtimestamp(int(v), MSK).replace(tzinfo=None).isoformat()
             except (ValueError, OSError):
                 continue
         for fmt in ("%H:%M:%S %d.%m.%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y %H:%M:%S"):
@@ -242,8 +315,8 @@ def fetch_ticket(tid: str) -> dict:
 LABELS = {"client": "КЛИЕНТ", "ai": "ИИ", "support": "ПОДДЕРЖКА"}
 
 
-def merge_group(tids: list, cache: dict):
-    """Объединяет сообщения всех заявок группы: сортировка по времени, без дублей."""
+def group_items(tids: list, cache: dict):
+    """Сообщения всех заявок группы: сортировка по времени, без дублей. -> [(iso_dt, kind, text)]"""
     seen, items = set(), []
     order = 0
     for tid in tids:
@@ -255,14 +328,66 @@ def merge_group(tids: list, cache: dict):
             items.append((dt or "9999", order, kind, text))
             order += 1
     items.sort(key=lambda x: (x[0], x[1]))
+    return [(("" if dt == "9999" else dt), k, t) for dt, _, k, t in items]
+
+
+def date_from_name(name: str):
+    """Дата из имени файла: queue_daily_20261025.xlsx -> date(2026, 10, 25). Нет даты -> None."""
+    for m in re.finditer(r"(?<!\d)(\d{8})(?!\d)", name):
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+    return None
+
+
+def filter_day(items, day):
+    """Оставляет сообщения указанного дня. Сообщения без даты оставляются (их нельзя отнести к дню).
+    Возвращает (items, число_без_даты)."""
+    if day is None:
+        return items, 0
+    iso = day.isoformat()
+    out = [(dt, k, t) for dt, k, t in items if not dt or dt[:10] == iso]
+    return out, sum(1 for dt, _, _ in items if not dt)
+
+
+def build_interactions(items):
+    """Пары «сообщение клиента — ответ ИИ» в порядке переписки.
+    Подряд идущие сообщения клиента (или ИИ) склеиваются. Сообщения поддержки в пары не входят."""
+    pairs, client, ai = [], [], []
+    for _, kind, text in items:
+        if kind == "client":
+            if ai:                       # клиент пишет снова после ответа ИИ — предыдущая пара закрыта
+                pairs.append(("\n".join(client), "\n".join(ai)))
+                client, ai = [], []
+            client.append(text)
+        elif kind == "ai":
+            ai.append(text)
+    if client or ai:
+        pairs.append(("\n".join(client), "\n".join(ai)))
+    return pairs
+
+
+PAIR_FORMAT = "Клиент: {client}\nИИ: {ai}"       # формат одной пары в колонке «Запрос клиента»
+
+
+def format_interactions(pairs):
+    return "\n---\n".join(PAIR_FORMAT.format(client=c or "—", ai=a or "— (ответа ИИ нет)") for c, a in pairs)
+
+
+def merge_group(items, day):
+    """-> (запрос_клиента_по_дню, ответы_ии, диалог, client_text_дня, ai_text_дня, число_без_даты)"""
     reply_kinds = ("ai",) if ONLY_AI_REPLIES else ("ai", "support")
-    client = [t for _, _, k, t in items if k == "client"]
-    replies = [t for _, _, k, t in items if k in reply_kinds]
-    n_ai = sum(1 for _, _, k, _ in items if k == "ai")
-    dialog = [f"[{LABELS.get(k, k)}] {t}" for _, _, k, t in items]
+    day_items, undated = filter_day(items, day)
+    pairs = build_interactions(day_items)
+    client_day = "\n".join(t for _, k, t in day_items if k == "client")
+    ai_day = "\n".join(t for _, k, t in day_items if k == "ai")
+    replies = [t for _, k, t in items if k in reply_kinds]
+    dialog = [f"[{LABELS.get(k, k)}] {t}" for _, k, t in items]
     cut = lambda x: x[:CELL_LIMIT]
     sep = "\n---\n"
-    return cut(sep.join(client)), cut(sep.join(replies)), n_ai, cut(sep.join(dialog))
+    return (cut(format_interactions(pairs)), cut(sep.join(replies)), cut(sep.join(dialog)),
+            client_day, ai_day, undated)
 
 
 # ---------- Excel ----------
@@ -279,6 +404,48 @@ def save_wb(wb, path):
     except PermissionError:
         sys.exit("Не могу сохранить файл — закройте его в Excel и запустите снова "
                  "(выгруженные заявки лежат в кэше, повторно качаться не будут).")
+
+
+def pick_sheet(wb):
+    """Активный лист, а если в нём нет колонки «Заявка» — первый лист, где она есть."""
+    def has_id(w):
+        return any(c.value and str(c.value).strip() == ID_COLUMN for c in w[1])
+    if has_id(wb.active):
+        return wb.active
+    for w in wb.worksheets:
+        if hde_rules.norm(w.title) != hde_rules.norm(hde_rules.ESC_SHEET) and has_id(w):
+            return w
+    return wb.active
+
+
+def mark_main_sheet(ws, rows, errors, cache, ctx):
+    """Ставит «Корректно» в колонку H по правилам возврата/отмены и переноса даты (см. hde_rules).
+    Колонка F — значение из файла (то, что решили по заявке). Уже заполненные ячейки H не трогаем."""
+    f_idx = column_index_from_string(hde_rules.MAIN_F_COL)
+    h_idx = column_index_from_string(hde_rules.MAIN_RESULT_COL)
+    f_head, h_head = ws.cell(1, f_idx).value, ws.cell(1, h_idx).value
+    print(f"Правила «Корректно»: колонка {hde_rules.MAIN_F_COL} = «{f_head}», "
+          f"колонка {hde_rules.MAIN_RESULT_COL} = «{h_head}»")
+    own = set(OUT_COLS)
+    if str(f_head).strip() in own or str(h_head).strip() in own:
+        print(f"ПРОПУЩЕНО: колонка {hde_rules.MAIN_F_COL} или {hde_rules.MAIN_RESULT_COL} занята колонкой, "
+              "которую создаёт сам скрипт. Проверьте расположение колонок в файле.")
+        return
+    marked = occupied = 0
+    for row, tid in rows.items():
+        if tid in errors or tid not in cache:
+            continue
+        gkey = cache[tid]["key"] or f"заявка-{tid}"
+        client_day, ai_day = ctx.get(gkey, ("", ""))
+        if not hde_rules.is_correct_main(client_day, ai_day, ws.cell(row, f_idx).value):
+            continue
+        cur = ws.cell(row, h_idx).value
+        if cur not in (None, "") and hde_rules.norm(cur) != hde_rules.norm(hde_rules.OK):
+            occupied += 1
+            continue
+        ws.cell(row, h_idx, hde_rules.OK)
+        marked += 1
+    print(f"«{hde_rules.OK}» в основном листе: {marked}; колонка H уже занята другим значением: {occupied}")
 
 
 def main():
@@ -310,9 +477,20 @@ def main():
         print(json.dumps(posts[:3], ensure_ascii=False, indent=2)[:4000])
         return
     path = find_input_file()
-    print("Файл:", path)
+    source_name = os.getenv("SOURCE_NAME") or path.name       # веб-версия копирует файл в input.xlsx
+    day = date_from_name(source_name)
+    print("Файл:", source_name)
+    print(f"Дата переписок из имени файла: {day.strftime('%d.%m.%Y')}" if day else
+          "В имени файла нет даты вида 20261025 — «Запрос клиента» собирается за всё время.")
     wb = load_workbook(path)
-    ws = wb.active
+    ws = pick_sheet(wb)
+
+    # --- 0) удалить колонки прошлых версий
+    old = sorted((c.column for c in ws[1] if c.value and str(c.value).strip() in REMOVED_COLS), reverse=True)
+    for idx in old:
+        ws.delete_cols(idx)
+    if old:
+        print(f"Удалено колонок: {len(old)} ({', '.join(REMOVED_COLS)})")
 
     headers = {str(c.value).strip(): c.column for c in ws[1] if c.value}
     if ID_COLUMN not in headers:
@@ -340,6 +518,9 @@ def main():
             continue
         try:
             cache[tid] = fetch_ticket(tid)
+        except RateLimitBlocked as e:
+            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            sys.exit(str(e))
         except Exception as e:
             errors[tid] = str(e)
         fetched += 1
@@ -361,31 +542,39 @@ def main():
         first_row.setdefault(gkey, row)
 
     # --- 3) запись в Excel
+    ctx, undated_total, empty_day = {}, 0, 0      # ctx[gkey] = (текст клиента за день, текст ИИ за день)
     for row, tid in rows.items():
         if tid in errors:
-            ws.cell(row, cols["Статус обработки"], f"Ошибка: {errors[tid]}")
+            ws.cell(row, cols["Запрос клиента"], f"Ошибка: {errors[tid]}")
             continue
         if tid not in cache:
             continue
         gkey = cache[tid]["key"] or f"заявка-{tid}"
         ws.cell(row, cols["ID переписки"], cache[tid]["key"])
-        ws.cell(row, cols["Заявки в группе"], ", ".join(groups[gkey]))
         if first_row[gkey] == row:
-            q, a, n, d = merge_group(groups[gkey], cache)
+            q, a, d, client_day, ai_day, undated = merge_group(group_items(groups[gkey], cache), day)
+            ctx[gkey] = (client_day, ai_day)
+            undated_total += undated
+            empty_day += 0 if q else 1
             ws.cell(row, cols["Запрос клиента"], q)
             ws.cell(row, cols["Ответы ИИ"], a)
-            ws.cell(row, cols["Кол-во ответов ИИ"], n)
             ws.cell(row, cols["Диалог (размечено)"], d)
-            ws.cell(row, cols["Статус обработки"], "OK")
         else:
-            for c in ("Запрос клиента", "Ответы ИИ", "Кол-во ответов ИИ", "Диалог (размечено)"):
-                ws.cell(row, cols[c], None)
-            ws.cell(row, cols["Статус обработки"], f"Объединено со строкой {first_row[gkey]}")
+            for c in OUT_COLS[1:]:
+                ws.cell(row, cols[c]).value = None      # ws.cell(.., None) НЕ очищает ячейку
+    if day and undated_total:
+        print(f"Внимание: {undated_total} сообщений без даты оставлены в «Запрос клиента» (день определить нельзя).")
+    if day and empty_day:
+        print(f"За {day.strftime('%d.%m.%Y')} нет сообщений в {empty_day} группах — «Запрос клиента» пустой.")
+
+    # --- 4) «Корректно» в основном листе (колонки F -> H) и на листе «Эскалации»
+    mark_main_sheet(ws, rows, errors, cache, ctx)
+    hde_rules.apply_escalations(wb)
 
     save_wb(wb, path)
     merged = sum(1 for g in groups.values() if len(g) > 1)
     print(f"Готово. Групп с несколькими заявками: {merged}. Без id переписки: "
-          f"{sum(1 for t in cache.values() if not t['key'])}")
+          f"{sum(1 for t in cache.values() if not t['key'])}. Ошибок: {len(errors)}")
 
 
 if __name__ == "__main__":
