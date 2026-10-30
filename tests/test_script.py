@@ -102,3 +102,34 @@ class Dates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportMode(unittest.TestCase):
+    """Готовый отчёт: без ключа HDE и без единого сетевого запроса."""
+
+    def test_report_mode_offline(self):
+        import tempfile
+        from openpyxl import Workbook, load_workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Обращения"
+        ws.append(["Заявка", "Тема", "Итог", "Запрос клиента", "Комментарий КСЭ"])
+        ws.append(["#1", "Отмена заказа", "Возврат оформлен + ответ клиенту", "просьба отменить", None])
+        ws.append(["#2", "x", "Не удалось автоматически → оператору", "что-то", None])
+        s = wb.create_sheet("Сводка")
+        s.append(["Дата", "27.10.2026"])
+        calls = []
+        orig = h.requests.get
+        h.requests.get = lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError("network!"))
+        saved = (h.HDE_EMAIL, h.HDE_API_KEY)
+        h.HDE_EMAIL = h.HDE_API_KEY = ""                    # ключа нет — режим отчёта не должен его требовать
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "input.xlsx"
+                h.run_report_mode(path, wb, "queue_daily_20261027.xlsx", date(2026, 10, 27))
+                out = load_workbook(path)["Обращения"]
+                self.assertEqual([out.cell(2, 5).value, out.cell(3, 5).value], ["Корректно", None])
+        finally:
+            h.requests.get = orig
+            h.HDE_EMAIL, h.HDE_API_KEY = saved
+        self.assertEqual(calls, [])

@@ -1,27 +1,41 @@
-"""Правила автоматической оценки («Корректно») для HDE AI Analysis.
+"""Правила автоматической оценки («Корректно») для готового отчёта HDE AI Analysis.
 
-Модуль не ходит в сеть и не знает про HDE: получает тексты и ячейки, возвращает решение.
+Модуль не ходит в сеть и не знает про HDE: получает ячейки, возвращает решение.
 Все фразы и стемы вынесены в константы вверху, чтобы их можно было дополнять.
+Колонки ищутся по ЗАГОЛОВКУ, а не по букве: если в отчёте поменяют порядок колонок, всё продолжит работать.
 """
 import re
 from datetime import datetime, time as dtime
 
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import get_column_letter
 
 OK = "Корректно"
 
 # ---------------------------------------------------------------- настройки
-MAIN_F_COL = "F"        # колонка с решением/обработкой в основном листе
-MAIN_RESULT_COL = "H"   # сюда пишем «Корректно» в основном листе
+REPORT_SHEET = "Обращения"
+# ключ -> заголовок колонки в отчёте (после ключа в скобках — буква в отчёте на 27.10.2026, только для справки)
+REPORT_COLS = {
+    "type": "Тип запроса",              # C
+    "subject": "Тема",                  # D
+    "result": "Итог",                   # F — что сделал ИИ
+    "client": "Запрос клиента",         # G
+    "note": "Причина / примечание",     # H
+    "opinion": "Комментарий КСЭ",       # I — сюда пишем «Корректно»
+}
+REPORT_REQUIRED = ("result", "client")   # без этих колонок лист не считается готовым отчётом
+SUMMARY_SHEET = "Сводка"
 
 ESC_SHEET = "Эскалации"
-ESC_TIME_COL = "B"      # время (UTC+3)
-ESC_REGION_COL = "D"    # регион
-ESC_EMAIL_COL = "E"     # email отправителя
-ESC_ROLE_COL = "G"      # «Управляющий офисом»
-ESC_EMAIL2_COL = "H"    # email получателя
-ESC_STATUS_COL = "I"    # «Ждёт рабочего времени офиса»
-ESC_RESULT_COL = "K"    # сюда пишем «Корректно» на листе эскалаций
+ESC_COLS = {
+    "time": "Время",                    # B — время UTC+3
+    "region": "Офис",                   # D
+    "to": "Изначальные адресаты",       # E
+    "role": "Кого подключили",          # G
+    "addr": "Адрес",                    # H
+    "status": "Итог",                   # I
+    "opinion": "Комментарий КСЭ",       # K — сюда пишем «Корректно»
+}
+ESC_REQUIRED = ("time", "region", "to", "role", "addr", "status")
 
 WORK_START = dtime(9, 0)
 WORK_END = dtime(18, 0)
@@ -40,21 +54,28 @@ def norm(s) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-# ---------------------------------------------------------------- основной лист
-# Клиент просит отмену / возврат (Отмена, Отмените, Возврат, ...)
-CANCEL_RE = re.compile(r"(?<!\w)(?:отмен|возврат)\w*")
+# ---------------------------------------------------------------- готовый отчёт («Обращения»)
+# Клиент просит отменить / вернуть заказ. Ищется в тексте запроса (G) И в теме (D).
+CANCEL_RE = re.compile(
+    r"(?<!\w)(?:отмен|отказ|возврат|возвращ|вернуть|верните|аннулир|не актуальн|передума)\w*")
 
-# Ответ ИИ, подтверждающий оформление возврата
-AI_RETURN_PHRASES = tuple(norm(p) for p in (
+# Значения «Итог» (F), при которых отмена считается обработанной верно
+F_CANCEL_PHRASES = tuple(norm(p) for p in (
+    "Возврат оформлен + ответ клиенту",
+    "Отменена часть списка → остальное оператору",
+))
+# Если ИИ написал это в «Причина / примечание» (H) — тоже считаем отмену обработанной
+NOTE_RETURN_PHRASES = tuple(norm(p) for p in (
     "Информация о необходимости возврата внесена в накладную",
     "По данному отправлению возврат уже оформлен ранее, повторная заявка не требуется",
 ))
-# Значение колонки F, подтверждающее отмену
-F_CANCEL_PHRASES = tuple(norm(p) for p in (
-    "Отменена часть списка → остальное оператору",
+
+# «Итог» (F) для подтверждения отмены: достаточно одного этого значения
+F_PROOF_PHRASES = tuple(norm(p) for p in (
+    "Запрос подтверждения отмены → ответ клиенту",
 ))
 
-# Клиент просит изменить / перенести дату доставки
+# Клиент просит изменить / перенести дату доставки (запрос G или тема D)
 DATE_CHANGE_RES = tuple(re.compile(p) for p in (
     # «Просьба доставить 30.10», «Простьба перенести доставку на ...», «просьба изменить дату»
     r"(?<!\w)прост?ьб\w*[^.\n]{0,40}?(?:достав|перенес|перенос|измен)",
@@ -62,8 +83,11 @@ DATE_CHANGE_RES = tuple(re.compile(p) for p in (
     r"(?<!\w)(?:измен|перенес|перенос|поменя|сдвин)\w*[^.\n]{0,25}?достав",
     # «доставить 30.10», «доставка на 30.10.2026»
     r"(?<!\w)достав\w*\s+(?:на\s+|до\s+|к\s+)?\d{1,2}[./-]\d{1,2}",
+    # «согласован перенос на 28.10», «перенести на 02.11»
+    r"(?<!\w)перенос\w*\s+(?:достав\w*\s+)?(?:на|до|с)\s+\d",
+    r"(?<!\w)перенес\w*\s+(?:достав\w*\s+)?(?:на|до|с)\s+\d",
 ))
-# Значения колонки F, подтверждающие обработку даты
+# «Итог» (F) для даты доставки
 F_DATE_PHRASES = tuple(norm(p) for p in (
     "Дата доставки изменена + ответ клиенту",
     "Дата уже стоит в УПД → ответ клиенту по шаблону",
@@ -75,23 +99,105 @@ def _has_any(text: str, phrases) -> bool:
     return any(p in text for p in phrases)
 
 
-def is_correct_cancel(client_text, ai_text, f_text) -> bool:
-    """Клиент просит отмену/возврат И (ответ ИИ — одна из двух фраз ИЛИ в колонке F «Отменена часть списка»)."""
-    if not CANCEL_RE.search(norm(client_text)):
-        return False
-    return _has_any(norm(ai_text), AI_RETURN_PHRASES) or _has_any(norm(f_text), F_CANCEL_PHRASES)
+def report_verdict(client, subject, note, result):
+    """Возвращает (is_correct: bool, rule: str).
+
+    1) Подтверждение отмены: «Итог» = «Запрос подтверждения отмены → ответ клиенту».
+    2) Отмена: в запросе клиента ИЛИ в теме есть слова об отмене/отказе/возврате
+       И («Итог» = «Возврат оформлен…» / «Отменена часть списка…» ИЛИ в примечании фраза про возврат).
+    3) Перенос даты: в запросе ИЛИ теме просьба изменить дату доставки И «Итог» — одно из трёх значений.
+    """
+    res = norm(result)
+    if _has_any(res, F_PROOF_PHRASES):
+        return True, "подтверждение отмены"
+    text = norm(client) + " \n " + norm(subject)
+    if CANCEL_RE.search(text) and (_has_any(res, F_CANCEL_PHRASES) or _has_any(norm(note), NOTE_RETURN_PHRASES)):
+        return True, "отмена"
+    if any(rx.search(text) for rx in DATE_CHANGE_RES) and _has_any(res, F_DATE_PHRASES):
+        return True, "перенос даты"
+    return False, ""
 
 
-def is_correct_date_change(client_text, f_text) -> bool:
-    """Клиент просит изменить дату доставки И колонка F — одно из трёх значений."""
-    c = norm(client_text)
-    if not any(rx.search(c) for rx in DATE_CHANGE_RES):
-        return False
-    return _has_any(norm(f_text), F_DATE_PHRASES)
+def find_columns(ws, spec, required=()):
+    """Ищет колонки по заголовку в первой строке. -> ({ключ: номер}, [ненайденные обязательные заголовки])."""
+    heads = {}
+    for c in ws[1]:
+        if c.value not in (None, ""):
+            heads.setdefault(norm(c.value), c.column)
+    found = {k: heads[norm(h)] for k, h in spec.items() if norm(h) in heads}
+    return found, [spec[k] for k in required if k not in found]
 
 
-def is_correct_main(client_text, ai_text, f_text) -> bool:
-    return is_correct_cancel(client_text, ai_text, f_text) or is_correct_date_change(client_text, f_text)
+def ensure_column(ws, cols, key, header):
+    """Если колонки нет — добавляет её в конец с этим заголовком."""
+    if key not in cols:
+        cols[key] = ws.max_column + 1
+        ws.cell(1, cols[key], header)
+    return cols[key]
+
+
+def is_report(wb) -> bool:
+    ws = find_sheet(wb, REPORT_SHEET)
+    return bool(ws is not None and not find_columns(ws, REPORT_COLS, REPORT_REQUIRED)[1])
+
+
+def report_date(wb):
+    """Дата из листа «Сводка» (ячейка рядом с подписью «Дата») как строка, либо None."""
+    ws = find_sheet(wb, SUMMARY_SHEET)
+    if ws is None:
+        return None
+    for row in ws.iter_rows(min_row=1, max_row=5, max_col=2, values_only=True):
+        if row[0] is not None and norm(row[0]) == "дата" and row[1] is not None:
+            return str(row[1]).strip()
+    return None
+
+
+def _write_ok(ws, row, col, stats):
+    """Пишет «Корректно» в пустую ячейку. Чужие значения не трогает. -> True, если записали."""
+    cur = ws.cell(row, col).value
+    if cur in (None, ""):
+        ws.cell(row, col, OK)
+        return True
+    if norm(cur) != norm(OK):
+        stats["occupied"] += 1
+    return False
+
+
+def apply_report(wb, log=print):
+    """Лист «Обращения»: «Корректно» в «Комментарий КСЭ» по report_verdict."""
+    ws = find_sheet(wb, REPORT_SHEET)
+    if ws is None:
+        log(f"Лист «{REPORT_SHEET}» не найден.")
+        return None
+    cols, missing = find_columns(ws, REPORT_COLS, REPORT_REQUIRED)
+    if missing:
+        log(f"Лист «{REPORT_SHEET}»: нет колонок {', '.join('«'+m+'»' for m in missing)} — пропущено.")
+        return None
+    ensure_column(ws, cols, "opinion", REPORT_COLS["opinion"])
+    get = lambda r, k: ws.cell(r, cols[k]).value if k in cols else None
+    stats = {"rows": 0, "marked": 0, "occupied": 0, "by_rule": {}, "left": {}}
+    for row in range(2, ws.max_row + 1):
+        if get(row, "result") in (None, "") and get(row, "client") in (None, ""):
+            continue
+        stats["rows"] += 1
+        ok, rule = report_verdict(get(row, "client"), get(row, "subject"), get(row, "note"), get(row, "result"))
+        if ok:
+            if _write_ok(ws, row, cols["opinion"], stats):
+                stats["marked"] += 1
+                stats["by_rule"][rule] = stats["by_rule"].get(rule, 0) + 1
+        elif get(row, "opinion") in (None, ""):
+            key = str(get(row, "result") or "—").strip()
+            stats["left"][key] = stats["left"].get(key, 0) + 1
+    letter = get_column_letter(cols["opinion"])
+    log(f"«{REPORT_SHEET}»: строк {stats['rows']}; «{OK}» проставлено {stats['marked']} в колонке {letter} "
+        f"({', '.join(f'{k}: {v}' for k, v in stats['by_rule'].items()) or '—'}); "
+        f"ячейка уже занята вашим текстом: {stats['occupied']}")
+    left = sum(stats["left"].values())
+    if left:
+        log(f"Осталось для ручной проверки: {left}")
+        for k, v in sorted(stats["left"].items(), key=lambda x: -x[1]):
+            log(f"   {v} × {k}")
+    return stats
 
 
 # ---------------------------------------------------------------- эскалации
@@ -101,6 +207,18 @@ _EMAIL_DOMAIN = re.compile(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)")
 def email_domain(value):
     m = _EMAIL_DOMAIN.search(str(value or ""))
     return m.group(1).lower() if m else None
+
+
+_TO_RE = re.compile(r"кому\s*:(.*?)(?=копия\s*:|скрыт\w*\s*:|$)", re.I | re.S)
+
+
+def to_domains(value):
+    """Домены адресов из поля «Кому:» (то, что стоит после «Копия:» не учитывается).
+    Если слова «Кому:» нет — берётся вся строка."""
+    text = str(value or "")
+    m = _TO_RE.search(text)
+    part = m.group(1) if m else text
+    return {d.lower() for d in _EMAIL_DOMAIN.findall(part)}
 
 
 # Смещение региона от UTC (часы). Ищется по началу слова; неизвестный регион → правило пропускается.
@@ -137,6 +255,9 @@ REGION_UTC = {
     "приморск": 10, "владивосток": 10, "хабаровск": 10,
     # +11
     "сахалин": 11, "южно-сахалинск": 11, "магадан": 11,
+    # добавлено по отчёту 27.10.2026
+    "пятигорск": 3, "грозн": 3, "нальчик": 3, "магнитогорск": 5, "норильск": 7,
+    "ангарск": 8, "братск": 8, "артем$": 10, "комсомольск": 10, "находк": 10,
     # +12
     "камчат": 12, "петропавловск": 12, "чукот": 12, "анадырь": 12,
 }
@@ -192,21 +313,23 @@ WAITING = norm("Ждёт рабочего времени офиса")
 def escalation_verdict(time_v, region_v, email_e, role_g, email_h, status_i):
     """Возвращает (is_correct: bool, reason: str). reason нужен для лога.
 
-    Правило 1: G «Управляющий офисом», I НЕ «Ждёт рабочего времени офиса», домен E == домен H.
-    Правило 2 (если возможно): то же, но I «Ждёт...», и время из B в регионе D вне 9:00–18:00.
+    Правило 1: «Кого подключили» = «Управляющий офисом», «Итог» НЕ «Ждёт рабочего времени офиса»,
+               домен адреса из «Изначальные адресаты» (Кому) == домен из «Адрес».
+    Правило 2 (если возможно): то же, но «Итог» = «Ждёт…», и время из «Время» (UTC+3) в регионе «Офис»
+               вне 9:00–18:00.
     """
     if MANAGER not in norm(role_g):
         return False, "не управляющий офисом"
-    d_e, d_h = email_domain(email_e), email_domain(email_h)
+    d_e, d_h = to_domains(email_e), email_domain(email_h)
     if not d_e or not d_h:
-        return False, "нет email в E или H"
-    if d_e != d_h:
+        return False, "нет email в «Изначальные адресаты» или «Адрес»"
+    if d_h not in d_e:
         return False, "домены различаются"
     if WAITING not in norm(status_i):
         return True, "правило 1"
     t = parse_time(time_v)
     if t is None:
-        return False, "правило 2 невозможно: не удалось прочитать время в B"
+        return False, "правило 2 невозможно: не удалось прочитать время в «Время»"
     off = region_offset(region_v)
     if off is None:
         return False, f"правило 2 невозможно: неизвестный регион {region_v!r}"
@@ -221,38 +344,42 @@ def find_sheet(wb, name):
 
 
 def apply_escalations(wb, log=print):
-    """Проходит лист «Эскалации» и ставит «Корректно» в колонку K. Существующие значения K не затирает."""
+    """Лист «Эскалации»: «Корректно» в «Комментарий КСЭ». Существующие значения не затирает."""
     ws = find_sheet(wb, ESC_SHEET)
     if ws is None:
         log(f"Лист «{ESC_SHEET}» не найден — правила эскалаций пропущены.")
         return {"marked": 0}
-    ci = {k: column_index_from_string(v) for k, v in dict(
-        t=ESC_TIME_COL, reg=ESC_REGION_COL, e=ESC_EMAIL_COL, g=ESC_ROLE_COL,
-        h=ESC_EMAIL2_COL, i=ESC_STATUS_COL, res=ESC_RESULT_COL).items()}
-    stats = {"marked": 0, "rule1": 0, "rule2": 0, "occupied": 0, "unknown_regions": {}, "bad_time": 0}
+    cols, missing = find_columns(ws, ESC_COLS, ESC_REQUIRED)
+    if missing:
+        log(f"Лист «{ESC_SHEET}»: нет колонок {', '.join('«'+m+'»' for m in missing)} — пропущено.")
+        return {"marked": 0}
+    ensure_column(ws, cols, "opinion", ESC_COLS["opinion"])
+    g = lambda r, k: ws.cell(r, cols[k]).value
+    stats = {"marked": 0, "rule1": 0, "rule2": 0, "occupied": 0, "unknown_regions": {}, "bad_time": 0,
+             "other_roles": {}}
     for row in range(2, ws.max_row + 1):
-        g = ws.cell(row, ci["g"]).value
-        if MANAGER not in norm(g):
+        role = g(row, "role")
+        if MANAGER not in norm(role):
+            if role not in (None, "") and g(row, "opinion") in (None, ""):
+                stats["other_roles"][str(role).strip()] = stats["other_roles"].get(str(role).strip(), 0) + 1
             continue
-        ok, why = escalation_verdict(
-            ws.cell(row, ci["t"]).value, ws.cell(row, ci["reg"]).value, ws.cell(row, ci["e"]).value,
-            g, ws.cell(row, ci["h"]).value, ws.cell(row, ci["i"]).value)
+        ok, why = escalation_verdict(g(row, "time"), g(row, "region"), g(row, "to"), role,
+                                     g(row, "addr"), g(row, "status"))
         if why.startswith("правило 2 невозможно: неизвестный регион"):
-            reg = str(ws.cell(row, ci["reg"]).value)
+            reg = str(g(row, "region"))
             stats["unknown_regions"][reg] = stats["unknown_regions"].get(reg, 0) + 1
         elif why.startswith("правило 2 невозможно: не удалось"):
             stats["bad_time"] += 1
         if not ok:
             continue
-        cur = ws.cell(row, ci["res"]).value
-        if cur not in (None, "") and norm(cur) != norm(OK):
-            stats["occupied"] += 1      # там уже что-то написано — не трогаем
-            continue
-        ws.cell(row, ci["res"], OK)
-        stats["marked"] += 1
-        stats["rule1" if why == "правило 1" else "rule2"] += 1
-    log(f"Эскалации: «{OK}» — {stats['marked']} (правило 1: {stats['rule1']}, правило 2: {stats['rule2']}); "
-        f"K уже занята другим значением: {stats['occupied']}; не прочитано время: {stats['bad_time']}")
+        if _write_ok(ws, row, cols["opinion"], stats):
+            stats["marked"] += 1
+            stats["rule1" if why == "правило 1" else "rule2"] += 1
+    log(f"«{ESC_SHEET}»: «{OK}» — {stats['marked']} (правило 1: {stats['rule1']}, правило 2: {stats['rule2']}); "
+        f"ячейка уже занята вашим текстом: {stats['occupied']}; не прочитано время: {stats['bad_time']}")
+    if stats["other_roles"]:
+        log("Не проверяются автоматически (правило только для «Управляющий офисом»): "
+            + ", ".join(f"{k} ×{v}" for k, v in stats["other_roles"].items()))
     if stats["unknown_regions"]:
         log("Регионы без известного часового пояса (правило 2 для них пропущено; добавьте в REGION_UTC): "
             + ", ".join(f"{k} ×{v}" for k, v in stats["unknown_regions"].items()))

@@ -30,21 +30,34 @@ To also mask names set `INSTALL_NATASHA=true` in `.env` and run `sudo docker com
 It needs roughly 300 MB extra RAM while a job runs; the container is limited to 400 MB, so on a 1 GB server
 check the load first (`free -h`) and stop other heavy jobs.
 
-## Input file and result columns
-- Name the file with the conversation date, e.g. `queue_daily_20261025.xlsx` (YYYYMMDD). **Запрос клиента** then contains only
-  that day's interactions, as `Клиент: … / ИИ: …` pairs. Without a date in the name, all messages are used.
-- Result columns: **ID переписки**, **Запрос клиента**, **Ответы ИИ**, **Диалог (размечено)**. The old columns
-  «Заявки в группе», «Кол-во ответов ИИ», «Статус обработки» are removed; ticket errors are written into «Запрос клиента».
-- **Корректно** (`app/hde_rules.py`; phrases and column letters are constants at the top of that file):
-  - main sheet, column **H** (only if empty): client asks for cancel/return and (AI reply is one of the two return phrases
-    or column **F** = «Отменена часть списка → остальное оператору»); or client asks to change the delivery date and
-    column **F** is one of the three date phrases;
-  - sheet «Эскалации», column **K** (only if empty): G = «Управляющий офисом», same e-mail domain in E and H, and either
-    I ≠ «Ждёт рабочего времени офиса», or I = it and the time in B (UTC+3) is outside 09:00–18:00 in the region from D.
-    Regions missing from the timezone table are listed in the log and skipped.
-- Tests: `python -m unittest discover -s tests`
+## Two kinds of input file
+**1. Ready daily report** (sheet «Обращения» with the columns «Итог» and «Запрос клиента»; normally also «Сводка», «Эскалации»).
+Nothing is downloaded from HelpDeskEddy, no HDE key is needed. The script only writes **Корректно** into the column
+**«Комментарий КСЭ»** (found by its header, not by letter) and never overwrites a cell that already has your text.
+Sheet «Обращения», any one of:
+- **Подтверждение отмены:** «Итог» = «Запрос подтверждения отмены → ответ клиенту».
+- **Отмена:** the client text (**Запрос клиента**) or the subject (**Тема**) contains a cancel/refusal word (отмена, отказался,
+  возврат, вернуть, аннулировать, не актуален, передумал …) **and** «Итог» = «Возврат оформлен + ответ клиенту» (or
+  «Отменена часть списка → остальное оператору», or the note contains one of the two old "return registered" phrases).
+- **Перенос даты:** the client text or the subject asks to change/move the delivery date **and** «Итог» is one of
+  «Дата доставки изменена + ответ клиенту», «Дата уже стоит в УПД → ответ клиенту по шаблону»,
+  «Дата недоступна → клиенту отправлен список вариантов».
 
-## API limit
+Sheet «Эскалации» («Комментарий КСЭ»): «Кого подключили» = «Управляющий офисом», the domain of the address in «Адрес» equals the domain of
+the **«Кому:»** address in «Изначальные адресаты» (addresses after «Копия:» are ignored), and either «Итог» ≠ «Ждёт рабочего времени офиса»,
+or it is equal and the time in «Время» (UTC+3) is outside 09:00–18:00 in the region of «Офис». Regions missing from the timezone table
+(`REGION_UTC`) are listed in the log and skipped. Other roles («Региональный управляющий», «ОКОВРС») are not checked automatically.
+
+At the end the log lists what is left for manual review, grouped by «Итог».
+The phrases and keywords are constants at the top of `app/hde_rules.py`.
+
+**2. Plain list of ticket numbers** (column «Заявка», no ready report): the tickets are downloaded from HDE (rate limit below) and
+the file gets the columns «ID переписки», «Запрос клиента», «Ответы ИИ», «Диалог (размечено)». If the file name contains a date
+(`queue_daily_20261025.xlsx`), «Запрос клиента» holds only that day's `Клиент: … / ИИ: …` pairs.
+
+Tests: `python -m unittest discover -s tests`
+
+## API limit (only when tickets are downloaded)
 HelpDeskEddy allows 300 requests/min per account and blocks the account for 20 minutes when exceeded. The script keeps a
 sliding 60-second window at 90% of the limit (`HDE_RATE_LIMIT_RPM`, `HDE_RATE_SAFETY`), slows down when the response
 headers report an almost empty quota, and on HTTP 429 stops at once (no retries) and keeps the tickets already downloaded.

@@ -23,7 +23,6 @@ from pathlib import Path
 
 import requests
 from openpyxl import load_workbook
-from openpyxl.utils import column_index_from_string
 
 import hde_rules
 
@@ -418,41 +417,29 @@ def pick_sheet(wb):
     return wb.active
 
 
-def mark_main_sheet(ws, rows, errors, cache, ctx):
-    """Ставит «Корректно» в колонку H по правилам возврата/отмены и переноса даты (см. hde_rules).
-    Колонка F — значение из файла (то, что решили по заявке). Уже заполненные ячейки H не трогаем."""
-    f_idx = column_index_from_string(hde_rules.MAIN_F_COL)
-    h_idx = column_index_from_string(hde_rules.MAIN_RESULT_COL)
-    f_head, h_head = ws.cell(1, f_idx).value, ws.cell(1, h_idx).value
-    print(f"Правила «Корректно»: колонка {hde_rules.MAIN_F_COL} = «{f_head}», "
-          f"колонка {hde_rules.MAIN_RESULT_COL} = «{h_head}»")
-    own = set(OUT_COLS)
-    if str(f_head).strip() in own or str(h_head).strip() in own:
-        print(f"ПРОПУЩЕНО: колонка {hde_rules.MAIN_F_COL} или {hde_rules.MAIN_RESULT_COL} занята колонкой, "
-              "которую создаёт сам скрипт. Проверьте расположение колонок в файле.")
-        return
-    marked = occupied = 0
-    for row, tid in rows.items():
-        if tid in errors or tid not in cache:
-            continue
-        gkey = cache[tid]["key"] or f"заявка-{tid}"
-        client_day, ai_day = ctx.get(gkey, ("", ""))
-        if not hde_rules.is_correct_main(client_day, ai_day, ws.cell(row, f_idx).value):
-            continue
-        cur = ws.cell(row, h_idx).value
-        if cur not in (None, "") and hde_rules.norm(cur) != hde_rules.norm(hde_rules.OK):
-            occupied += 1
-            continue
-        ws.cell(row, h_idx, hde_rules.OK)
-        marked += 1
-    print(f"«{hde_rules.OK}» в основном листе: {marked}; колонка H уже занята другим значением: {occupied}")
-
-
-def main():
+def need_credentials():
     if not HDE_EMAIL or not HDE_API_KEY:
         sys.exit("Не заданы HDE_EMAIL и/или HDE_API_KEY. Задайте переменные окружения "
                  "в ЭТОМ ЖЕ окне терминала или впишите значения в настройки вверху файла.")
+
+
+def run_report_mode(path, wb, source_name, day):
+    """Готовый отчёт («Обращения» с колонками «Итог» и «Запрос клиента»): заявки скачивать не нужно.
+    Только проверка правил и «Корректно». Сеть и ключ HDE не нужны."""
+    print("Режим: готовый отчёт — заявки из HDE не скачиваются, запросов к API нет.")
+    in_report = hde_rules.report_date(wb)
+    if in_report and day and in_report.replace(" ", "") != day.strftime("%d.%m.%Y"):
+        print(f"ВНИМАНИЕ: в имени файла дата {day.strftime('%d.%m.%Y')}, а на листе «Сводка» — {in_report}. "
+              "Проверьте, тот ли файл загружен.")
+    hde_rules.apply_report(wb)
+    hde_rules.apply_escalations(wb)
+    save_wb(wb, path)
+    print("Готово.")
+
+
+def main():
     if "--posts" in sys.argv:
+        need_credentials()
         tid = sys.argv[sys.argv.index("--posts") + 1]
         posts = get_posts(tid)
         print(f"Сообщений: {len(posts)}  (id переписки: {extract_key(posts) or '—'})")
@@ -464,6 +451,7 @@ def main():
         print("Ключи сообщения:", sorted(posts[0].keys()) if posts else "—")
         return
     if "--debug" in sys.argv:
+        need_credentials()
         tid = sys.argv[sys.argv.index("--debug") + 1]
         data = api_get(f"/tickets/{tid}/")
         if "__error__" in data:
@@ -483,6 +471,10 @@ def main():
     print(f"Дата переписок из имени файла: {day.strftime('%d.%m.%Y')}" if day else
           "В имени файла нет даты вида 20261025 — «Запрос клиента» собирается за всё время.")
     wb = load_workbook(path)
+    if hde_rules.is_report(wb):
+        return run_report_mode(path, wb, source_name, day)
+    need_credentials()
+    print("Режим: список номеров заявок — заявки будут скачаны из HDE.")
     ws = pick_sheet(wb)
 
     # --- 0) удалить колонки прошлых версий
@@ -567,8 +559,6 @@ def main():
     if day and empty_day:
         print(f"За {day.strftime('%d.%m.%Y')} нет сообщений в {empty_day} группах — «Запрос клиента» пустой.")
 
-    # --- 4) «Корректно» в основном листе (колонки F -> H) и на листе «Эскалации»
-    mark_main_sheet(ws, rows, errors, cache, ctx)
     hde_rules.apply_escalations(wb)
 
     save_wb(wb, path)

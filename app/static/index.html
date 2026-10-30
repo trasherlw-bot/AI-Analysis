@@ -29,13 +29,13 @@
       <div class="right"><a class="btn back-btn" href="../">← Back to projects</a> <button id="logout" class="btn ghost">Sign out</button></div>
     </div>
     <p class="muted">Takes an Excel list of HelpDeskEddy ticket numbers, downloads the tickets, masks personal data, and splits client requests from AI replies.</p>
-    <div id="warn" class="warn" hidden>HDE_EMAIL / HDE_API_KEY are not set on the server. Edit <code>.env</code> and restart the container.</div>
+    <div id="warn" class="warn" hidden>HDE_EMAIL / HDE_API_KEY are not set on the server. They are only needed for files that contain just ticket numbers; ready reports (sheet «Обращения») work without them. To set them, edit <code>.env</code> and restart the container.</div>
 
     <div id="names-warn" class="warn" hidden>Personal names are <b>not</b> masked (the name-recognition module is not installed). Emails, phones, links and long numbers are masked, but check the result by eye before sharing it.</div>
 
     <div class="card">
       <h2>1. Add a file</h2>
-      <p class="muted small">Upload an .xlsx here, or copy it into <code>/opt/hde-analysis/data/inbox/</code> with WinSCP. The ticket numbers must be in a column named <b>Заявка</b>.</p>
+      <p class="muted small">Upload an .xlsx here, or copy it into <code>/opt/hde-analysis/data/inbox/</code> with WinSCP. Ready daily report (sheet <b>Обращения</b> with columns <b>Итог</b> and <b>Запрос клиента</b>): nothing is downloaded, the rules only fill in «Корректно». Otherwise the ticket numbers must be in a column named <b>Заявка</b>.</p>
       <div class="row">
         <input id="file" type="file" accept=".xlsx">
         <button id="upload" class="btn">Upload</button>
